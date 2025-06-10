@@ -4,7 +4,24 @@ import { useState, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import debounce from "lodash/debounce";
-import { SearchIcon, PlusIcon, XIcon } from "lucide-react";
+import { SearchIcon, PlusIcon, XIcon, GripVertical } from "lucide-react";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import Button from "@/components/Button";
 
 interface Song {
@@ -13,6 +30,65 @@ interface Song {
   artist: string;
   duration: number;
   uri: string;
+}
+
+const formatDuration = (ms: number) => {
+  const minutes = Math.floor(ms / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+};
+
+interface SortableSongItemProps {
+  song: Song;
+  onRemove: (id: string) => void;
+}
+
+function SortableSongItem({ song, onRemove }: SortableSongItemProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: song.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="flex items-center justify-between p-4 bg-gray-100 rounded"
+    >
+      <div className="flex items-center gap-3">
+        <button
+          className="cursor-grab active:cursor-grabbing p-1 hover:text-[#F47B3E] transition-colors"
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical size={20} />
+        </button>
+        <div>
+          <h3 className="font-medium">{song.title}</h3>
+          <p className="text-gray-600">{song.artist}</p>
+        </div>
+      </div>
+      <div className="flex items-center space-x-4">
+        <span className="text-gray-600">{formatDuration(song.duration)}</span>
+        <button
+          onClick={() => onRemove(song.id)}
+          className="p-1.5 rounded-full bg-red-500 text-white hover:bg-red-600 transition-colors duration-150"
+        >
+          <XIcon size={18} />
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export default function SongSelection({ params }: { params: { id: string } }) {
@@ -24,6 +100,13 @@ export default function SongSelection({ params }: { params: { id: string } }) {
   const [isLoading, setIsLoading] = useState(false);
   const [mixtape, setMixtape] = useState<{ title: string } | null>(null);
   const [showSuggestions, setShowSuggestions] = useState(false);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   useEffect(() => {
     // Fetch mixtape details
@@ -78,6 +161,24 @@ export default function SongSelection({ params }: { params: { id: string } }) {
     setSelectedSongs((prev) => prev.filter((s) => s.id !== songId));
   };
 
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    
+    if (over && active.id !== over.id) {
+      setSelectedSongs((songs) => {
+        const oldIndex = songs.findIndex((song) => song.id === active.id);
+        const newIndex = songs.findIndex((song) => song.id === over.id);
+        
+        const newSongs = arrayMove(songs, oldIndex, newIndex).map((song, index) => ({
+          ...song,
+          order: index,
+        }));
+        
+        return newSongs;
+      });
+    }
+  };
+
   const saveMixtape = async () => {
     if (selectedSongs.length === 0) return;
 
@@ -108,12 +209,6 @@ export default function SongSelection({ params }: { params: { id: string } }) {
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const formatDuration = (ms: number) => {
-    const minutes = Math.floor(ms / 60000);
-    const seconds = Math.floor((ms % 60000) / 1000);
-    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
   };
 
   if (!session) {
@@ -165,57 +260,48 @@ export default function SongSelection({ params }: { params: { id: string } }) {
           <div className="mb-12">
             <div className="bg-gray-100 rounded-lg max-h-80 overflow-y-auto">
               {searchResults.map((song) => (
-                <div
+                <button
                   key={song.id}
-                  className="flex items-center justify-between p-4 hover:bg-gray-200 border-b border-gray-200 last:border-b-0"
+                  onClick={() => addSong(song)}
+                  className="w-full text-left flex items-center justify-between p-4 hover:bg-gray-200 border-b border-gray-200 last:border-b-0 transition-colors duration-150"
                 >
                   <div>
                     <h3 className="font-medium">{song.title}</h3>
                     <p className="text-gray-600">{song.artist}</p>
                   </div>
-                  <div className="flex items-center space-x-4">
-                    <span className="text-gray-600">{formatDuration(song.duration)}</span>
-                    <button
-                      onClick={() => addSong(song)}
-                      className="p-1.5 rounded-full bg-[#F47B3E] text-white hover:bg-[#E06A2D]"
-                    >
-                      <PlusIcon size={18} />
-                    </button>
-                  </div>
-                </div>
+                  <span className="text-gray-600">{formatDuration(song.duration)}</span>
+                </button>
               ))}
             </div>
           </div>
         )}
 
         {/* Selected Songs */}
-        <div className="mb-8">
+        <div className="mb-12">
           <h2 className="text-2xl mb-4 font-serif">Selected Songs</h2>
           {selectedSongs.length === 0 ? (
             <p className="text-gray-600">No songs selected yet.</p>
           ) : (
-            <div className="space-y-2">
-              {selectedSongs.map((song) => (
-                <div
-                  key={song.id}
-                  className="flex items-center justify-between p-4 bg-gray-100 rounded"
-                >
-                  <div>
-                    <h3 className="font-medium">{song.title}</h3>
-                    <p className="text-gray-600">{song.artist}</p>
-                  </div>
-                  <div className="flex items-center space-x-4">
-                    <span className="text-gray-600">{formatDuration(song.duration)}</span>
-                    <button
-                      onClick={() => removeSong(song.id)}
-                      className="p-1.5 rounded-full bg-red-500 text-white hover:bg-red-600"
-                    >
-                      <XIcon size={18} />
-                    </button>
-                  </div>
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+            >
+              <SortableContext
+                items={selectedSongs.map((song) => song.id)}
+                strategy={verticalListSortingStrategy}
+              >
+                <div className="space-y-2">
+                  {selectedSongs.map((song) => (
+                    <SortableSongItem
+                      key={song.id}
+                      song={song}
+                      onRemove={removeSong}
+                    />
+                  ))}
                 </div>
-              ))}
-            </div>
+              </SortableContext>
+            </DndContext>
           )}
         </div>
 

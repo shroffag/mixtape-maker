@@ -32,6 +32,8 @@ interface PlayerState {
     };
   };
   paused: boolean;
+  position: number;
+  duration: number;
 }
 
 export default function SharedMixtapeView({ params }: { params: { shareId: string } }) {
@@ -46,6 +48,7 @@ export default function SharedMixtapeView({ params }: { params: { shareId: strin
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [isSpotifyReady, setIsSpotifyReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [playerState, setPlayerState] = useState<PlayerState | null>(null);
 
   useEffect(() => {
     if (status === "unauthenticated") {
@@ -84,6 +87,8 @@ export default function SharedMixtapeView({ params }: { params: { shareId: strin
 
   useEffect(() => {
     if (isSpotifyReady && session?.accessToken) {
+      let stateCheckInterval: NodeJS.Timeout;
+      
       const initializePlayer = async () => {
         try {
           console.log("Initializing Spotify player...");
@@ -132,8 +137,12 @@ export default function SharedMixtapeView({ params }: { params: { shareId: strin
           });
 
           player.addListener("player_state_changed", (state: PlayerState) => {
+            console.log("Player state changed:", state);
             if (state) {
+              setPlayerState(state);
               setIsPlaying(!state.paused);
+              
+              // Update current track
               const currentTrackIndex = mixtape?.songs.findIndex(
                 (song) => song.spotifyId === state.track_window.current_track.uri.split(":")[2]
               );
@@ -143,11 +152,23 @@ export default function SharedMixtapeView({ params }: { params: { shareId: strin
             }
           });
 
+          // Add periodic state check to ensure we're in sync
+          stateCheckInterval = setInterval(async () => {
+            if (player) {
+              const state = await player.getCurrentState();
+              if (state) {
+                setPlayerState(state);
+                setIsPlaying(!state.paused);
+              }
+            }
+          }, 1000);
+
           console.log("Connecting to Spotify...");
           const connected = await player.connect();
           
           if (connected) {
             console.log("Successfully connected to Spotify");
+            setPlayer(player);
           } else {
             console.error("Failed to connect to Spotify");
             setError("Failed to connect to Spotify");
@@ -161,13 +182,14 @@ export default function SharedMixtapeView({ params }: { params: { shareId: strin
       initializePlayer();
 
       return () => {
+        clearInterval(stateCheckInterval);
         if (player) {
           console.log("Disconnecting player...");
           player.disconnect();
         }
       };
     }
-  }, [session?.accessToken, isSpotifyReady]);
+  }, [session?.accessToken, isSpotifyReady, mixtape?.songs]);
 
   const playMixtape = async () => {
     if (!deviceId || !mixtape?.songs.length) {
@@ -233,11 +255,58 @@ export default function SharedMixtapeView({ params }: { params: { shareId: strin
       return;
     }
 
+    console.log("togglePlayPause called. isPlaying:", isPlaying, "playerState?.paused:", playerState?.paused);
+
     try {
-      if (isPlaying) {
-        await player.pause();
+      if (!isPlaying || playerState?.paused) {
+        // RESUME: Transfer playback, then start at correct position using Web API
+        if (deviceId && session?.accessToken && mixtape && mixtape.songs[currentTrack]) {
+          const track = mixtape.songs[currentTrack];
+          const position = playerState?.position || 0;
+          const uri = `spotify:track:${track.spotifyId}`;
+          console.log("[RESUME] Transferring playback to device", deviceId);
+          const transferResponse = await fetch("https://api.spotify.com/v1/me/player", {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${session.accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              device_ids: [deviceId],
+              play: false,
+            }),
+          });
+          if (!transferResponse.ok && transferResponse.status !== 204) {
+            console.error("Failed to transfer playback:", transferResponse.status);
+            throw new Error("Failed to transfer playback to device");
+          }
+          await new Promise(resolve => setTimeout(resolve, 500));
+          console.log(`[RESUME] Starting playback at position ${position}ms for track ${uri}`);
+          const playResponse = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${session.accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              uris: mixtape.songs.map((s) => `spotify:track:${s.spotifyId}`),
+              offset: { uri },
+              position_ms: position,
+            }),
+          });
+          if (!playResponse.ok && playResponse.status !== 204) {
+            const errorData = await playResponse.json().catch(() => ({}));
+            console.error("Failed to start playback:", errorData);
+            throw new Error(errorData.error?.message || "Failed to start playback");
+          }
+          console.log("[RESUME] Successfully started playback");
+        } else {
+          console.warn("[RESUME] Missing deviceId, accessToken, mixtape, or track");
+        }
       } else {
-        await player.resume();
+        // PAUSE: Just pause
+        console.log("[PAUSE] Pausing playback...");
+        await player.pause();
       }
     } catch (error) {
       console.error("Error toggling playback:", error);
